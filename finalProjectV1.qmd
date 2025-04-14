@@ -1,0 +1,395 @@
+```{r}
+library(knitr)
+library(ggplot2)
+library(plyr)
+library(dplyr)
+library(tidyverse)
+library(caret)
+library(scales)
+library(Rmisc)
+library(ggrepel)
+library(randomForest)
+library(xgboost)
+library(dplyr)
+library(stringr)
+library(stats)
+library(nnet)
+library(Metrics)
+```
+
+## Data Cleaning...
+
+```{r}
+train <- read.csv("train.csv", stringsAsFactors = F)
+test <- read.csv("test.csv", stringsAsFactors = F)
+```
+
+```{r}
+names(train)
+```
+
+```{r}
+dim(train)
+```
+
+```{r}
+train <- select(train, -c('ID', 'Num_Credit_Card'))
+
+```
+
+```{r}
+str(train[,c(1:26, 26)])
+
+```
+
+```{r}
+
+# Identify numeric and non numeric features
+
+numeric_feat <- names(train)[sapply(train, is.numeric)]
+non_numeric_feat <- names(train)[!sapply(train, is.numeric)]
+
+train[numeric_feat] %>% sample_n(5)
+```
+
+```{r}
+non_numeric_feat_toNumeric <- names(train[, c('Age', 'Annual_Income', 
+                                              'Num_of_Loan', 'Num_of_Delayed_Payment',
+                                              'Changed_Credit_Limit', 'Outstanding_Debt', 
+                                              'Amount_invested_monthly', 'Monthly_Balance')])
+non_numeric_feat_toNumeric
+```
+
+```{r}
+# Transform non_numeric_feat_toNumeric to numeric features
+
+columnas <- c('Age', 'Annual_Income','Changed_Credit_Limit', 'Outstanding_Debt', 'Amount_invested_monthly', 'Monthly_Balance')
+
+train[columnas] <- lapply(train[columnas], as.numeric)
+```
+
+```{r}
+categoric_feat <- names(train[, c('Credit_Mix', 'Payment_of_Min_Amount', 'Payment_Behaviour', 'Credit_Score')])
+categoric_feat
+```
+
+Missing Value
+
+```{r}
+colSums(is.na(train)) / nrow(train) * 100
+```
+
+```{r}
+# Hardcoding minimum and maximum in Age.
+
+limite_superior_Age <- 100
+
+train$Age <- pmin(train$Age, limite_superior_Age)
+
+limite_inferior_Age <- 0
+
+train$Age <- pmax(train$Age, limite_inferior_Age)
+summary(train[,c('Age')])
+```
+
+```{r}
+# Extract from Credit_History_Age the number of years adn create a new feature
+
+train <- train %>%
+  mutate(Credit_History_Age_New = as.numeric(str_extract(Credit_History_Age, "\\d+")))
+```
+
+```{r}
+# Calculating the diference of the averages between Age and Credit_History_Age_New
+
+promedio_Age <- mean(train$Age, na.rm = TRUE)
+promedio_Credit_History_Age_New <- mean(train$Credit_History_Age_New, na.rm = TRUE)
+
+diferencias_promedios <- promedio_Age - promedio_Credit_History_Age_New
+print(diferencias_promedios)
+```
+
+```{r}
+# Substitute NaN values in Age for the value in Credit_History_Age_New plus the diference of the averages
+
+for (i in 1:length(train$Age)) {
+  if (is.na(train$Age[i])) {
+    if (is.na(train$Credit_History_Age_New[i])) {
+      train$Age[i] <- promedio_Age
+    } else {
+      train$Age[i] <- train$Credit_History_Age_New[i] + diferencias_promedios
+    }
+  }
+}
+```
+
+```{r}
+# Substitute NaN values in Credit_History_Age_New for the value in Age minus the diference of the averages
+
+for (i in 1:length(train$Credit_History_Age_New)) {
+  if (is.na(train$Credit_History_Age_New[i])) {
+    if (is.na(train$Age[i])) {
+      train$Credit_History_Age_New[i] <- promedio_Credit_History_Age_New
+    } else {
+      train$Credit_History_Age_New[i] <- train$Age[i] - diferencias_promedios
+    }
+  }
+}
+```
+
+## Filling NaN
+
+```{r}
+columnas_na <- c("Annual_Income", "Num_of_Loan", "Num_of_Delayed_Payment", "Changed_Credit_Limit", "Num_Credit_Inquiries", "Outstanding_Debt", "Amount_invested_monthly", "Monthly_Balance")
+
+train <- train %>%
+  mutate_at(vars(columnas_na), ~ifelse(is.na(.), mean(., na.rm = TRUE), .))
+```
+
+```{r}
+colSums(is.na(train))
+```
+
+```{r}
+# Correlation between Monthly_Inhand_Salary and the rest of the variables
+
+cor(train[, sapply(train, is.numeric)], use = "complete.obs")
+```
+
+```{r}
+### Multiple linear regression model
+
+# We split the dataset in two; rows with NaN and rows without NaN.
+Monthly_Inhand_Salary_NA <- train[is.na(train$Monthly_Inhand_Salary), ]
+
+Monthly_Inhand_Salary_NO_NA <- train[!is.na(train$Monthly_Inhand_Salary), ]
+
+# We select the features acording to the correlation table above. Those ones with corr above 0.10 are selected.
+feat_Monthly_Inhand_Salary <- Monthly_Inhand_Salary_NO_NA[, c("Monthly_Inhand_Salary","Credit_Utilization_Ratio","Amount_invested_monthly", "Monthly_Balance", "Credit_History_Age_New")]
+
+# We train the model
+modelo_Monthly_Inhand_Salary <- lm(Monthly_Inhand_Salary ~ ., data = feat_Monthly_Inhand_Salary)
+summary(modelo_Monthly_Inhand_Salary)
+```
+
+```{r}
+# Filling NaN values with the model predictions
+
+predicted_values <- predict(modelo_Monthly_Inhand_Salary, newdata = Monthly_Inhand_Salary_NA)
+
+train$Monthly_Inhand_Salary[is.na(train$Monthly_Inhand_Salary)] <- predicted_values
+```
+
+```{r}
+limite_inferior <- 0
+
+train$Monthly_Inhand_Salary <- pmax(train$Monthly_Inhand_Salary, limite_inferior)
+```
+
+```{r}
+train <- select(train, -c('Credit_History_Age'))
+```
+
+Encoding
+
+```{r}
+# Every value in these features makes sense?
+
+lapply(train[, c('Credit_Mix', 'Payment_of_Min_Amount', 'Payment_Behaviour', 'Credit_Score')], unique)
+```
+
+```{r}
+# Eliminate rows with "!@9#%8"
+
+train <- train[!train$Payment_Behaviour %in% "!@9#%8", ]
+```
+
+```{r}
+# Transforming into numbers its categories
+
+train <- train %>%
+    mutate(Payment_Behaviour = recode(Payment_Behaviour, "Low_spent_Small_value_payments" = 1, 
+                                             "Low_spent_Medium_value_payments" = 2, 
+                                             "Low_spent_Large_value_payments" = 3, 
+                                             "High_spent_Small_value_payments" = 4, 
+                                             "High_spent_Medium_value_payments" = 5, 
+                                             "High_spent_Large_value_payments" = 6))
+```
+
+```{r}
+train <- train %>%
+    mutate(Payment_of_Min_Amount = recode(Payment_of_Min_Amount, "No" = 0, 
+                                             "Yes" = 1))
+```
+
+```{r}
+cor(train[, sapply(train, is.numeric)], use = "complete.obs")
+```
+
+```{r}
+### Logistic regression model
+
+# We divide the dataset in two: rows with NaN values and without.
+Payment_of_Min_Amount_NA <- train[is.na(train$Payment_of_Min_Amount), ]
+
+Payment_of_Min_Amount_NO_NA <- train[!is.na(train$Payment_of_Min_Amount), ]
+
+# We select the features according to the correlation coeficient. Those with more than 0.10 were chosen
+feat_Payment_of_Min_Amount <- Payment_of_Min_Amount_NO_NA[, c("Payment_of_Min_Amount","Delay_from_due_date","Changed_Credit_Limit", "Outstanding_Debt")]
+
+# Model training
+modelo_Payment_of_Min_Amount <- glm(Payment_of_Min_Amount ~ Delay_from_due_date + Changed_Credit_Limit + Outstanding_Debt, data = Payment_of_Min_Amount_NO_NA, family = binomial)
+summary(modelo_Payment_of_Min_Amount)
+```
+
+```{r}
+# Filling NaN values with the model predictions
+
+predicted_values_2 <- predict(modelo_Payment_of_Min_Amount, newdata = Payment_of_Min_Amount_NA, type ="response")
+
+binary_predictions <- ifelse(predicted_values_2 >= 0.5, 1, 0)
+
+train$Payment_of_Min_Amount[is.na(train$Payment_of_Min_Amount)] <- binary_predictions
+```
+
+Encoding credit score
+
+```{r}
+train <- train %>%
+    mutate(Credit_Score = recode(Credit_Score, "Good" = 0, 
+                                             "Standard" = 1,
+                                                "Poor" = 2))
+```
+
+```{r}
+# Eliminate Credit Mix column
+train <- select(train, -c('Credit_Mix'))
+```
+
+Feature selection
+
+```{r}
+# Correlation matriz to select features
+
+corr <- cor(train[, sapply(train, is.numeric)], use = "complete.obs", method = "spearman")
+
+corr["Credit_Score",]
+```
+
+```{r}
+# Selected features
+
+feat_selected <- c("Num_Bank_Accounts", "Interest_Rate",
+                       "Delay_from_due_date", "Num_Credit_Inquiries",
+                       "Outstanding_Debt", "Payment_of_Min_Amount",
+                       "Credit_History_Age_New", "Monthly_Inhand_Salary")
+features <- as.formula(paste("Credit_Score ~", paste(feat_selected, collapse = "+")))
+```
+
+## Modeling
+
+```{r}
+### Splitting into training, validation and test sets
+
+# Setting seed
+set.seed(123)
+
+# Defining proportions
+prop_train <- 0.7
+prop_val <- 0.15
+prop_test <- 0.15
+
+# Getting the size of each set
+n <- nrow(train)
+size_train <- round(prop_train * n)
+size_val <- round(prop_val * n)
+size_test <- n - size_train - size_val
+
+# Generating random indexes
+indices <- sample(1:n, size = n)
+
+# Dividing the dataset
+train_data <- train[indices[1:size_train], ]
+val_data <- train[indices[(size_train + 1):(size_train + size_val)], ]
+test_data <- train[indices[(size_train + size_val + 1):n], ]
+```
+
+```{r}
+#Regression Logistic Model
+library(nnet)
+model_log <- multinom(features, data = train_data)
+predictions_log <- predict(model_log, newdata = val_data[feat_selected])
+summary(model_log)
+
+# Accuracy
+accuracy_log <- sum(predictions_log == val_data$Credit_Score) / length(val_data$Credit_Score)
+print(paste("Accuracy:", accuracy_log))
+
+# Confusion matrix
+matrix_confusion_log <- table(predictions_log, val_data$Credit_Score)
+print(matrix_confusion_log)
+
+# Precision
+precision_log <- matrix_confusion_log[2, 2] / sum(matrix_confusion_log[, 2])
+print(paste("Precision:", precision_log))
+
+# Recall
+recall_log <- matrix_confusion_log[2, 2] / sum(matrix_confusion_log[2, ])
+print(paste("Recall:", recall_log))
+
+# F-1 Score
+f1_log <- 2 * (precision_log * recall_log) / (precision_log + recall_log)
+print(paste("Puntuation F1:", f1_log))
+
+# ROC Curve
+library(pROC)
+curva_roc <- roc(val_data$Credit_Score, as.numeric(predictions_log))
+plot(curva_roc, main = "ROC Curve", print.auc = TRUE, auc.polygon = TRUE, grid = TRUE)
+```
+
+```{r}
+train_X <- train_data[, feat_selected]
+train_y <- train_data$Credit_Score
+test_X <- val_data[, feat_selected]
+test_y <- val_data$Credit_Score
+
+params <- list(
+  objective = "multi:softmax",
+  num_class = 3,
+  eta = 0.1,
+  max_depth = 6,
+  min_child_weight = 1,
+  subsample = 0.8,
+  colsample_bytree = 0.8
+)
+
+model_xgb <- xgboost(data = as.matrix(train_X), label = train_y, params = params, nrounds = 100)
+predictions_xgb <- predict(model_xgb, as.matrix(test_X))
+```
+
+```{r}
+# Accuracy
+accuracy_xgb <- sum(predictions_xgb == val_data$Credit_Score) / length(val_data$Credit_Score)
+print(paste("Accuracy:", accuracy_xgb))
+
+# Confusion matrix
+matrix_confusion_xgb <- table(predictions_xgb, val_data$Credit_Score)
+print(matrix_confusion_xgb)
+
+# Precision
+precision_xgb <- matrix_confusion_xgb[2, 2] / sum(matrix_confusion_xgb[, 2])
+print(paste("Precision:", precision_xgb))
+
+# Recall
+recall_xgb <- matrix_confusion_xgb[2, 2] / sum(matrix_confusion_xgb[2, ])
+print(paste("Recall:", recall_xgb))
+
+# F1-score
+f1_xgb <- 2 * (precision_xgb * recall_xgb) / (precision_xgb + recall_xgb)
+print(paste("Puntuation F1:", f1_xgb))
+
+# ROC Curve
+library(pROC)
+curva_roc <- roc(val_data$Credit_Score, as.numeric(predictions_xgb))
+plot(curva_roc, main = "ROC Curve", print.auc = TRUE, auc.polygon = TRUE, grid = TRUE)
+```
